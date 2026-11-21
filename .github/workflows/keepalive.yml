@@ -1,0 +1,64 @@
+name: 邮箱保活
+
+# 每周一 11:23（北京时间）自动登录一次，防止"连续一年未登录"被禁用。
+# GitHub 定时任务可能延迟几分钟到几十分钟，属正常现象。
+# 每次运行把脚本输出重定向到 result.txt（每次覆盖）并提交进仓库：
+# 最新输出在文件里，历史输出留在 git 提交记录里。
+on:
+  schedule:
+    - cron: "23 3 * * 1" # UTC 03:23 = 北京时间 11:23
+  workflow_dispatch: # 支持在 Actions 页面手动触发
+
+# contents: write 仅用于提交 result.txt 运行记录
+permissions:
+  contents: write
+
+concurrency:
+  group: mail-keepalive
+  cancel-in-progress: false
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # 官方 action，且运行时 Secrets 尚未进入环境（Secrets 仅在后续步骤的 env 中）
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # 输出重定向到 result.txt（含 stderr）；登录失败时保留输出并让任务变红
+      # 凭据经环境变量注入而非拼进命令行：避免密码中的特殊字符破坏 shell 引号，
+      # 也是 GitHub 官方推荐的 Secrets 用法
+      - name: 模拟登录保活
+        env:
+          MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}
+          MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}
+        run: |
+          node keepalive.mjs > result.txt 2>&1
+          code=$?
+          if [ $code -ne 0 ]; then
+            echo "LOGIN_FAILED=1" >> "$GITHUB_ENV"
+            exit $code
+          fi
+
+      # 失败的运行也照样提交记录（if: always()）；任务整体仍会变红
+      - name: 提交运行记录
+        if: always()
+        run: |
+          if [ -n "$(git status --porcelain result.txt)" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add result.txt
+            if [ "${LOGIN_FAILED:-}" = "1" ]; then
+              MSG="keepalive failed @ $(date -u +%F)"
+            else
+              MSG="keepalive ok @ $(date -u +%F)"
+            fi
+            git commit -m "$MSG"
+            git push
+          else
+            echo "result.txt 无变化，跳过提交"
+          fi
