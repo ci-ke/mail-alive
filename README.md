@@ -67,9 +67,9 @@ POST https://mailh.qiye.163.com/js6/s?sid=<sid>&func=mbox:listMessages
 
 ## 代理（GitHub 上基本必需）
 
-GitHub runner 的机房 IP 会触发网易登录风控（`VERIFYCODE.REQ`，本地宽带则不会，实测确认）。给脚本传入 clash 订阅链接（`--sub-url` 参数或 Secret `CLASH_SUB_URL`）后，脚本全自动管理 mihomo：查找内核（环境变量 `MIHOMO_BIN` → 项目 `bin/` 目录 → 当前目录 → 常见安装位置）→ 生成临时配置 → 启动 → 等订阅加载 → 逐个切换节点尝试登录（触发验证码或网络错误就换下一个，默认最多 8 个，`CLASH_MAX_NODES` 可调）→ 结束时自动关闭内核。密码错误是确定性失败，会立即停止。配置与订阅内容只写入系统临时目录，不进入仓库；HTTPS 端到端加密，代理只能看到目标域名，看不到密码与邮件内容。
+GitHub runner 的机房 IP 会触发网易登录风控（`VERIFYCODE.REQ`，本地宽带则不会，实测确认）。给脚本传入 clash 订阅链接（`--sub-url` 参数或 Secret `CLASH_SUB_URL`）后，脚本全自动管理 mihomo：查找内核（环境变量 `MIHOMO_BIN` → 项目 `bin/` 目录 → 当前目录 → 常见安装位置）→ 生成临时配置 → 启动 → 等订阅加载 → 逐个切换节点：**每个节点先经它访问外网测试地址（默认 Google generate_204，`CLASH_TEST_URL` 可改）做可用性预检，坏节点直接跳过**，通过后才用它登录邮箱；登录触发验证码或网络错误就换下一个节点（默认最多尝试 10 个，`CLASH_MAX_NODES` 可调），要求短信二次验证（`risk_2fa_sms`）则立即停止。配置与订阅内容只写入系统临时目录，不进入仓库；HTTPS 端到端加密，代理只能看到目标域名，看不到密码与邮件内容。
 
-CI 中 workflow 只负责下载固定版本的 mihomo 内核并注入 Secret，其余全部由脚本完成。不传订阅链接且未设 `HTTPS_PROXY` 时为直连，行为不变。
+CI 中 workflow 只负责下载固定版本的 mihomo 内核并注入 Secret，其余全部由脚本完成。mihomo 监听端口默认 **17890/19090**（刻意避开本机常见 Clash 的 7890/9090，防止流量打进你自己的 Clash 被短路直连；可用 `CLASH_MIXED_PORT`/`CLASH_CONTROLLER_PORT` 调整，脚本会自动检测端口占用并报错）。不传订阅链接且未设 `HTTPS_PROXY` 时为直连，行为不变。
 
 ## 部署
 
