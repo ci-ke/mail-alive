@@ -441,6 +441,24 @@ async function startMihomo(subUrl) {
   process.exit(1);
 }
 
+/**
+ * 一次性 HTTPS Agent：把已与目标完成 TLS 握手的隧道 socket 交给 HTTP 栈使用。
+ *
+ * 注意（踩过的坑）：不能用 https.request({ agent: false, createConnection }),
+ * Node 在 agent:false 时会内部新建 Agent 并自行拨号直连目标，请求选项里的
+ * createConnection 会被忽略——表现为"看似走了代理，实际全程直连"。
+ * 必须通过自定义 Agent 的 createConnection（Agent 的方法）返回隧道 socket。
+ */
+class OneShotHttpsAgent extends https.Agent {
+  constructor(tunnelSocket) {
+    super({ keepAlive: false, maxSockets: 1 });
+    this.tunnelSocket = tunnelSocket;
+  }
+  createConnection() {
+    return this.tunnelSocket;
+  }
+}
+
 function httpRequest({
   url,
   method = "GET",
@@ -450,13 +468,14 @@ function httpRequest({
 }) {
   const target = new URL(url);
   return (async () => {
-    let tunnelSocket = null;
+    let agent = false;
     if (PROXY_URL) {
-      tunnelSocket = await connectThroughProxy(
+      const tunnelSocket = await connectThroughProxy(
         PROXY_URL,
         target.hostname,
         Number(target.port) || 443,
       );
+      agent = new OneShotHttpsAgent(tunnelSocket);
     }
     return await new Promise((resolve, reject) => {
       const req = https.request(
@@ -466,8 +485,7 @@ function httpRequest({
           path: target.pathname + target.search,
           method,
           headers,
-          agent: false,
-          ...(tunnelSocket ? { createConnection: () => tunnelSocket } : {}),
+          agent,
         },
         (res) => {
           const chunks = [];
