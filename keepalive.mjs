@@ -95,9 +95,18 @@ const NODE_TEST_TIMEOUT_MS = 8_000;
 // 防止本机自己的 Clash 占用同名端口时，脚本的 CONNECT 打进别人的实例、流量被短路直连
 const CLASH_MIXED_PORT = Number(process.env.CLASH_MIXED_PORT || 17890);
 const CLASH_CONTROLLER_PORT = Number(process.env.CLASH_CONTROLLER_PORT || 19090);
-/** 订阅中常见的信息类条目，不是真实代理节点，跳过 */
+/**
+ * 请求订阅时声明的客户端标识。不少机场按 User-Agent 返回不同的节点集合：
+ * mihomo 内核默认发 clash.meta/<版本>，可能拿到被裁剪过的列表（订阅里会出现
+ * "过滤掉 N 条线路" 之类的信息条目）；声明为 mihomo/<版本> 可拿到完整节点。
+ * 预检/登录节点本身仍由本地 mihomo 执行，这里只是告诉订阅服务器"我是谁"。
+ */
+const CLASH_SUB_UA =
+  process.env.CLASH_SUB_UA?.trim() ||
+  `mihomo/${process.env.MIHOMO_VERSION?.trim() || "v1.19.34"}`;
+/** 订阅中常见的信息类条目（含机场的"过滤掉 N 条线路"提示），不是真实代理节点，跳过 */
 const NODE_NAME_BLACKLIST =
-  /^(官网|套餐|剩余|到期|流量|重置|发布|订阅|更新|官址)/i;
+  /^(官网|套餐|剩余|到期|流量|重置|发布|订阅|更新|官址|过滤)/i;
 
 /**
  * 全局日志脱敏：公有仓库的 Actions 日志对所有人可见，凡是可能带出账号/域名/密码/sid
@@ -425,6 +434,9 @@ proxy-providers:
     url: "${subUrl}"
     path: ./providers/sub.yaml
     interval: 86400
+    header:
+      User-Agent:
+        - "${CLASH_SUB_UA}"
     health-check:
       enable: true
       url: "http://www.gstatic.com/generate_204"
@@ -630,7 +642,7 @@ const USAGE = `用法: node keepalive.mjs [-u <邮箱>] [-p <密码>] [-s <clash
   -h, --help              显示本帮助
 
 其他调优项（环境变量）: CLASH_MAX_NODES / CLASH_TEST_URL / CLASH_NODE_FILTER /
-CLASH_GROUP / MIHOMO_BIN / CLASH_MIXED_PORT / CLASH_CONTROLLER_PORT
+CLASH_GROUP / CLASH_SUB_UA / MIHOMO_BIN / CLASH_MIXED_PORT / CLASH_CONTROLLER_PORT
 注意: 命令行参数可能留在 shell 历史记录与进程列表中，介意就用 .env 或环境变量。`;
 
 /** 命名参数（argparse 风格）为主，位置参数向后兼容，环境变量兜底 */

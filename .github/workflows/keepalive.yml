@@ -51,6 +51,7 @@ jobs:
           CLASH_MAX_NODES: ${{ vars.CLASH_MAX_NODES }}
           CLASH_TEST_URL: ${{ vars.CLASH_TEST_URL }}
           CLASH_GROUP: ${{ vars.CLASH_GROUP }}
+          CLASH_SUB_UA: ${{ vars.CLASH_SUB_UA }}
           CLASH_MIXED_PORT: ${{ vars.CLASH_MIXED_PORT }}
           CLASH_CONTROLLER_PORT: ${{ vars.CLASH_CONTROLLER_PORT }}
           # 只写最小摘要到该文件（完整日志留在 Actions 页面）

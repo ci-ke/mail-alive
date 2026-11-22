@@ -24,7 +24,10 @@ node keepalive.mjs -u you@your.domain -p your-password -s "https://订阅链接"
 | `--node-filter` | `CLASH_NODE_FILTER` | 否 | 只使用名称含任一关键词的节点，逗号分隔，如 `日本,新加坡` |
 | — | `CLASH_MAX_NODES` | 否 | 最多尝试几个节点，默认 10 |
 | — | `CLASH_TEST_URL` | 否 | 节点可用性预检地址 |
+| — | `CLASH_SUB_UA` | 否 | 请求订阅时的客户端标识，默认 `mihomo/<内核版本>`；机场按 UA 裁剪节点时可改 |
 | — | `CLASH_GROUP` / `CLASH_MIXED_PORT` / `CLASH_CONTROLLER_PORT` | 否 | 高级调优 |
+
+> 订阅服务器常按客户端标识返回不同的节点集合。mihomo 内核默认以 `clash.meta/<版本>` 请求，可能拿到被机场裁掉一部分的列表（订阅里会出现「过滤掉 N 条线路」之类的条目）；脚本默认改为以 `mihomo/<版本>` 请求，拿到完整节点集。若你的机场行为不同，用 `CLASH_SUB_UA` 覆盖。
 
 也可以把 `MAIL_USERNAME=...` 等写进脚本同目录的 `.env`（已在 `.gitignore`），然后零参数运行。注意命令行参数会留在 shell 历史和进程列表里，介意就用环境变量。
 
@@ -66,7 +69,7 @@ workflow 已在 `.github/workflows/keepalive.yml`：每周一北京时间 11:23 
    | `MAIL_PASSWORD` | 是 | 登录密码 |
    | `CLASH_SUB_URL` | 否 | 订阅链接；**不设置就直连**。GitHub runner 是机房 IP，直连容易触发风控，一般建议设置 |
 
-3. （可选）**Variables** 里按需添加 `CLASH_NODE_FILTER`、`CLASH_MAX_NODES`、`CLASH_TEST_URL`、`CLASH_GROUP`、`CLASH_MIXED_PORT`、`CLASH_CONTROLLER_PORT`，留空即用默认值。
+3. （可选）**Variables** 里按需添加 `CLASH_NODE_FILTER`、`CLASH_MAX_NODES`、`CLASH_TEST_URL`、`CLASH_GROUP`、`CLASH_SUB_UA`、`CLASH_MIXED_PORT`、`CLASH_CONTROLLER_PORT`，留空即用默认值。
 4. Actions → 「邮箱保活」→ Run workflow 手动跑一次验证。
 
 运行日志直接打印在 Actions 页面；仓库里的 `result.txt` 只有一行摘要（运行时间 / 成功与否 / 最新邮件时间），失败的运行也会提交记录并把任务标红。
