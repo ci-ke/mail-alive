@@ -12,9 +12,9 @@
  * 全局脱敏（账号/域名/密码/sid，含 URL 编码形式），适配公开仓库可见的
  * CI 日志与提交进仓库的运行记录。
  *
- * 运行记录：本脚本只负责向控制台输出，GitHub Actions workflow 会把输出
- * 重定向到仓库根目录的 result.txt（每次运行覆盖）并提交进仓库——最新输出
- * 在文件里，历史输出留在 git 提交记录里。
+ * 运行记录：完整日志只打印到控制台（CI 里即 Actions 日志，随时可删）；只有设置了
+ * RESULT_FILE 时才写一行摘要（运行时间/成功与否/最新邮件时间），CI 用它提交
+ * result.txt——进入 git 的内容不便删除，所以文件里只留最小信息。
  *
  * 登录协议（逆向自登录页原生表单，密码为明文表单字段，无需预取 Cookie）：
  *   1. POST https://entryhz.qiye.163.com/domain/domainEntLogin
@@ -50,9 +50,10 @@
  *   node keepalive.mjs -u you@your.domain -p your-password
  *
  * 给定订阅链接时脚本自动管理 mihomo（内核查找顺序：MIHOMO_BIN 环境变量 →
- * 当前目录 ./mihomo(.exe) → /usr/local/bin/mihomo）：生成临时配置、启动内核、
- * 等订阅加载、按节点轮询登录、退出时自动关闭内核。配置与订阅内容只写入
- * 系统临时目录，不会进入当前目录/仓库。
+ * ./bin/mihomo(.exe) → ./mihomo(.exe) → /usr/local/bin/mihomo → /usr/bin/mihomo）：
+ * 生成临时配置、启动内核、等订阅加载、按节点轮询登录、退出时自动关闭内核。
+ * 可用 CLASH_NODE_FILTER 只保留名称含指定关键词的节点（逗号分隔，匹配不到即失败，
+ * 不会退回其他节点）。配置与订阅内容只写入系统临时目录，不会进入当前目录/仓库。
  */
 
 import https from "node:https";
@@ -880,6 +881,44 @@ async function getEgressIp(viaProxy = true) {
   return null;
 }
 
+/** 本机直连出口，只查一次（同一次运行里结果稳定） */
+let directEgressCache;
+async function getDirectEgress() {
+  if (directEgressCache === undefined) {
+    directEgressCache = await getEgressIp(false);
+  }
+  return directEgressCache;
+}
+
+/** 查询当前线路的出口 IP；失败返回空串，不影响登录 */
+async function queryEgress() {
+  try {
+    const resp = await httpRequest({
+      url: "https://api.ipify.org",
+      timeoutMs: 6000,
+    });
+    return resp.text.trim();
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * 防直连：经节点出口与本机直连出口相同，说明流量其实没走代理，按用户要求终止。
+ * mihomo 配置里没有 DIRECT 规则，正常情况下两者必然不同。
+ */
+async function checkNotDirect(tunnelEgress) {
+  const direct = await getDirectEgress();
+  if (tunnelEgress && direct && tunnelEgress === direct) {
+    log(
+      "❌ 代理未生效：经节点出口与本机直连出口相同，流量疑似直连。按要求终止本次运行。",
+    );
+    process.exitCode = 1;
+    return false;
+  }
+  return true;
+}
+
 async function main() {
   const creds = parseCredentials();
   installScrubber(creds);
@@ -890,22 +929,6 @@ async function main() {
     if (creds.subUrl) {
       // 给定订阅链接：自动管理 mihomo 生命周期
       mihomo = await startMihomo(creds.subUrl);
-    }
-    if (PROXY_URL) {
-      const tunnelEgress = await getEgressIp(true);
-      log(`代理出口 IP: ${maskIp(tunnelEgress)}（登录将以该 IP 出站）`);
-      // 直连对比：经节点出口与本机直连出口相同 ≠ 直连泄漏（某些机场的出口线路
-      // 就是本机所在网络的教育网出口），但值得记录——mihomo 配置无 DIRECT 规则、
-      // 所有请求强制过隧道，结构性上不存在直连路径
-      const directEgress = await getEgressIp(false);
-      log(`本机直连出口 IP: ${maskIp(directEgress)}`);
-      if (tunnelEgress && directEgress && tunnelEgress === directEgress) {
-        log(
-          "❌ 代理未生效：经节点出口与本机直连出口相同，流量疑似直连。按要求终止本次运行。",
-        );
-        process.exitCode = 1;
-        return;
-      }
     }
     await runKeepalive(creds);
   } finally {
@@ -931,16 +954,21 @@ async function runKeepalive(creds) {
         log("节点可用性测试未通过（无法访问外网），跳过该节点");
         continue;
       }
-      // 记录本次登录实际使用的出口 IP（节点出口可能漂移，便于与登录记录核对）
-      try {
-        const egress = await httpRequest({
-          url: "https://api.ipify.org",
-          timeoutMs: 6000,
-        });
-        if (egress.text.trim()) log(`本次登录出口 IP: ${maskIp(egress.text)}`);
-      } catch {
-        // 出口查询失败不影响登录
+      // 先核对实际出口：同时对照本机直连出口，防止"看似走了节点、实际直连"
+      const egress = await queryEgress();
+      if (egress) {
+        const direct = await getDirectEgress();
+        log(
+          `本次登录出口 IP: ${maskIp(egress)}` +
+            (direct ? `（本机直连出口 ${maskIp(direct)}）` : ""),
+        );
+        if (!(await checkNotDirect(egress))) return;
       }
+    } else if (PROXY_URL) {
+      // 手工指定 HTTPS_PROXY 或节点列表读取失败：用当前默认节点登录，先做一次防直连校验
+      const egress = await queryEgress();
+      log(`代理出口 IP: ${maskIp(egress)}（登录将以该 IP 出站）`);
+      if (!(await checkNotDirect(egress))) return;
     }
     let result;
     try {
