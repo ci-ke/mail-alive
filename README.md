@@ -21,11 +21,13 @@ node keepalive.mjs -u you@your.domain -p your-password -s "https://订阅链接"
 | `-u, --username` | `MAIL_USERNAME` | 是 | 完整邮箱地址 |
 | `-p, --password` | `MAIL_PASSWORD` | 是 | 登录密码 |
 | `-s, --sub-url` | `CLASH_SUB_URL` | 否 | clash 订阅链接；**不传就直连** |
-| `--node-filter` | `CLASH_NODE_FILTER` | 否 | 只使用名称含任一关键词的节点，逗号分隔，如 `日本,新加坡` |
+| `--node-filter` | `CLASH_NODE_FILTER` | 否 | 节点名通配筛选：`*` 匹配任意字符，无 `*` 即精准匹配，逗号分隔，如 `*日本*,新加坡*` |
 | — | `CLASH_MAX_NODES` | 否 | 最多尝试几个节点，默认 10 |
 | — | `CLASH_TEST_URL` | 否 | 节点可用性预检地址 |
 | — | `CLASH_SUB_UA` | 否 | 请求订阅时的客户端标识，默认 `mihomo/<内核版本>`；机场按 UA 裁剪节点时可改 |
 | — | `CLASH_GROUP` / `CLASH_MIXED_PORT` / `CLASH_CONTROLLER_PORT` | 否 | 高级调优 |
+
+> 通配规则：`*` 匹配任意长度（含空），所以 `*日本*` 是包含、`日本*` 是前缀、`*优化` 是后缀、`日本-优化` 是精准。名称含空格/逗号时用引号包裹；字面逗号也可以转义写成 `\,`，字面星号写 `\*`（如 `系统\*核心`），`\\` 表示字面反斜杠。多个条件逗号分隔，命中任一即可；一个都不匹配时本次直接失败，不会退回其他节点。shell 里建议整段用单引号：`--node-filter '*日本*,新加坡*'`。
 
 > 订阅服务器常按客户端标识返回不同的节点集合。mihomo 内核默认以 `clash.meta/<版本>` 请求，可能拿到被机场裁掉一部分的列表（订阅里会出现「过滤掉 N 条线路」之类的条目）；脚本默认改为以 `mihomo/<版本>` 请求，拿到完整节点集。若你的机场行为不同，用 `CLASH_SUB_UA` 覆盖。
 

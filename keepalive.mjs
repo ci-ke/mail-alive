@@ -52,8 +52,9 @@
  * 给定订阅链接时脚本自动管理 mihomo（内核查找顺序：MIHOMO_BIN 环境变量 →
  * ./bin/mihomo(.exe) → ./mihomo(.exe) → /usr/local/bin/mihomo → /usr/bin/mihomo）：
  * 生成临时配置、启动内核、等订阅加载、按节点轮询登录、退出时自动关闭内核。
- * 可用 CLASH_NODE_FILTER 只保留名称含指定关键词的节点（逗号分隔，匹配不到即失败，
- * 不会退回其他节点）。配置与订阅内容只写入系统临时目录，不会进入当前目录/仓库。
+ * 可用 CLASH_NODE_FILTER 按通配模式筛选节点（* 匹配任意字符，无 * 即精准匹配，
+ * 逗号分隔；\* 表示字面星号），匹配不到即失败，不会退回其他节点。
+ * 配置与订阅内容只写入系统临时目录，不会进入当前目录/仓库。
  */
 
 import https from "node:https";
@@ -299,26 +300,85 @@ function clashRequest({ method = "GET", path, body = null }) {
 }
 
 /**
- * 解析节点名筛选关键词（CLASH_NODE_FILTER）。
- * 支持逗号（含全角）分隔多个关键词，关键词可用引号包裹（含空格的名字更直观）：
- *   CLASH_NODE_FILTER="日本,新加坡"
- *   CLASH_NODE_FILTER='"日本", "日本 01"'
+ * 解析节点筛选表达式（CLASH_NODE_FILTER / --node-filter）。
+ *
+ * 每个条件是一个通配模式，逗号（含全角）分隔，命中任一即可：
+ *   *日本*  包含匹配     日本*  前缀匹配      *优化  后缀匹配
+ *   日本-优化          精准匹配（不含 * 时）
+ * 名称可用引号包裹以包含空格/逗号；要匹配字面星号/逗号/反斜杠用转义：
+ *   \* → 星号、\, → 逗号、\\ → 反斜杠（引号内外都支持）
+ *
  * 注意在用时才解析：命令行 --node-filter 会在 parseCredentials 时才注入环境变量，
  * 顶层常量会在此之前就把值固定下来。
  */
 function parseNodeFilters(raw) {
   if (!raw) return [];
-  const terms = [];
-  for (const match of String(raw).matchAll(/"([^"]*)"|'([^']*)'|([^,，]+)/g)) {
-    // 第三分支会把前导空格和引号一起吞进来（如 , "日本 01"），统一去掉引号
-    const term = (match[1] ?? match[2] ?? match[3] ?? "")
-      .trim()
-      .replace(/^["'“”‘’]+|["'“”‘’]+$/g, "")
-      .trim();
-    if (term) terms.push(term);
+  const text = String(raw);
+  const quoteEnd = { '"': '"', "'": "'", "“": "”", "‘": "’" };
+  const isSep = (ch) => ch === "," || ch === "，" || /\s/.test(ch);
+  const patterns = [];
+  let i = 0;
+  while (i < text.length) {
+    if (isSep(text[i])) {
+      i++;
+      continue;
+    }
+    let value = "";
+    const endQuote = quoteEnd[text[i]];
+    if (endQuote) {
+      i++; // 跳过起始引号
+      while (i < text.length && text[i] !== endQuote) {
+        if (text[i] === "\\" && i + 1 < text.length) {
+          value += `\\${text[i + 1]}`; // 保留转义，交给 globToRegExp 解释为字面字符
+          i += 2;
+        } else {
+          value += text[i++];
+        }
+      }
+      i++; // 跳过结尾引号
+      // 引号后的杂字符忽略，避免被误当成下一个条件
+      while (i < text.length && !isSep(text[i])) i++;
+    } else {
+      while (i < text.length && text[i] !== "," && text[i] !== "，") {
+        if (text[i] === "\\" && i + 1 < text.length) {
+          value += `\\${text[i + 1]}`;
+          i += 2;
+        } else {
+          value += text[i++];
+        }
+      }
+    }
+    value = value.trim();
+    if (value) patterns.push(value);
   }
-  return terms;
+  return patterns;
 }
+
+/** 把通配模式编译为正则（大小写不敏感）：* 匹配任意长度，\x 表示字面字符 x，其余按字面 */
+function globToRegExp(pattern) {
+  const escapeRe = (ch) => ch.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  let re = "";
+  for (let i = 0; i < pattern.length; i++) {
+    const ch = pattern[i];
+    if (ch === "\\" && i + 1 < pattern.length) {
+      re += escapeRe(pattern[i + 1]);
+      i++;
+    } else if (ch === "*") {
+      re += ".*";
+    } else {
+      re += escapeRe(ch);
+    }
+  }
+  return new RegExp(`^${re}$`, "i");
+}
+
+/** 节点名是否命中任一通配模式 */
+function matchesNodeFilters(name, patterns) {
+  return patterns.some((p) => globToRegExp(p).test(name));
+}
+
+/** 日志里展示筛选条件（带引号便于看出空格），如 "*日本*" */
+const formatNodeFilter = (p) => `"${p}"`;
 
 /**
  * 计算本次运行的"线路"计划：
@@ -356,14 +416,10 @@ async function resolveNodePlan() {
     (n) => !NODE_NAME_BLACKLIST.test(n),
   );
   if (filters.length) {
-    const keywords = filters.map((k) => k.toLowerCase());
     const before = nodes.length;
-    nodes = nodes.filter((n) => {
-      const name = n.toLowerCase();
-      return keywords.some((kw) => name.includes(kw));
-    });
+    nodes = nodes.filter((n) => matchesNodeFilters(n, filters));
     log(
-      `节点筛选（名称含 ${filters.map((k) => `"${k}"`).join(" 或 ")}）: ${before} → ${nodes.length} 个`,
+      `节点筛选（${filters.map(formatNodeFilter).join(" 或 ")}）: ${before} → ${nodes.length} 个`,
     );
     if (!nodes.length) {
       log(
@@ -636,8 +692,9 @@ const USAGE = `用法: node keepalive.mjs [-u <邮箱>] [-p <密码>] [-s <clash
   -u, --username <邮箱>   完整邮箱地址（环境变量/​.env: MAIL_USERNAME 兜底）
   -p, --password <密码>   登录密码（环境变量/​.env: MAIL_PASSWORD 兜底）
   -s, --sub-url <链接>    clash 订阅链接；传入后自动管理 mihomo（CLASH_SUB_URL 兜底）
-      --node-filter <关键词[,关键词]>
-                          只使用名称含任一关键词的节点，如 "日本,新加坡"
+      --node-filter <模式[,模式]>
+                          按节点名通配筛选：* 匹配任意字符（无 * 即精准匹配），
+                          如 *日本*、日本-*、日本-优化；\\* 字面星号、\\, 字面逗号
                           （环境变量 CLASH_NODE_FILTER 兜底）
   -h, --help              显示本帮助
 
