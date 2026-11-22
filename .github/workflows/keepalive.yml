@@ -2,8 +2,9 @@ name: 邮箱保活
 
 # 每周一 11:23（北京时间）自动登录一次，防止"连续一年未登录"被禁用。
 # GitHub 定时任务可能延迟几分钟到几十分钟，属正常现象。
-# 每次运行把脚本输出重定向到 result.txt（每次覆盖）并提交进仓库：
-# 最新输出在文件里，历史输出留在 git 提交记录里。
+# 每次运行把脚本输出直接打进 Actions 日志（日志可随时删除）；
+# 同时脚本按 RESULT_FILE 只写一行摘要（运行时间/成功与否/最新邮件时间），
+# 该文件提交进仓库——进入 git 历史的内容不便删除，所以只留最小信息。
 on:
   schedule:
     - cron: "23 3 * * 1" # UTC 03:23 = 北京时间 11:23
@@ -43,13 +44,21 @@ jobs:
         env:
           MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}
           MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}
+          # 可选：不设就走直连（不启动 mihomo）；CI 里通常建议设置，见 README「代理」
           CLASH_SUB_URL: ${{ secrets.CLASH_SUB_URL }}
+          # 以下都来自仓库 Variables，留空即用脚本默认值
+          CLASH_NODE_FILTER: ${{ vars.CLASH_NODE_FILTER }}
+          CLASH_MAX_NODES: ${{ vars.CLASH_MAX_NODES }}
+          CLASH_TEST_URL: ${{ vars.CLASH_TEST_URL }}
+          CLASH_GROUP: ${{ vars.CLASH_GROUP }}
+          CLASH_MIXED_PORT: ${{ vars.CLASH_MIXED_PORT }}
+          CLASH_CONTROLLER_PORT: ${{ vars.CLASH_CONTROLLER_PORT }}
+          # 只写最小摘要到该文件（完整日志留在 Actions 页面）
+          RESULT_FILE: result.txt
         run: |
-          node keepalive.mjs > result.txt 2>&1
-          code=$?
-          if [ $code -ne 0 ]; then
+          if ! node keepalive.mjs; then
             echo "LOGIN_FAILED=1" >> "$GITHUB_ENV"
-            exit $code
+            exit 1
           fi
 
       # 失败的运行也照样提交记录（if: always()）；任务整体仍会变红

@@ -5,8 +5,10 @@
 ## 脱敏设计（适配公有仓库）
 
 - 代码与仓库中**不含任何具体邮箱域/账号/机构字符串**；登录域、接口地址全部由环境变量 `MAIL_USERNAME`（完整邮箱地址）推导
-- 凭据只存放在 GitHub Actions Secrets（经环境变量注入，不拼进命令行，避免密码特殊字符破坏 shell 引号），**日志中密码、sid、账号、域名全程打码**（含 URL 编码形式，失败诊断日志与提交进仓库的 result.txt 同样兜底）
+- 凭据只存放在 GitHub Actions Secrets（经环境变量注入，不拼进命令行，避免密码特殊字符破坏 shell 引号），**日志中密码、sid、账号、域名全程打码**（含 URL 编码形式，失败诊断日志同样兜底）
+- 日志里的出口 IP **只保留网段**（如 `209.146.*.*`），够核对是否走了节点，又不把完整地址留在公开日志里
 - 反馈只记录**最新一封邮件的日期**这一元数据，不记录标题、发件人等任何邮件内容（避免邮件信息泄入公开的 CI 日志与仓库）
+- 提交进仓库的 `result.txt` 只有一行为摘要（运行时间/成功与否/最新邮件时间）；完整运行日志只留在 Actions 页面，日志可以随时删除，而 git 历史里的内容不便删除
 - workflow 无第三方依赖（仅 GitHub 官方 `checkout`/`setup-node`，且运行时 Secrets 尚未进入环境），权限仅 `contents: write`（用于提交运行记录）
 
 ## 工作原理
@@ -30,8 +32,13 @@ POST https://mailh.qiye.163.com/js6/s?sid=<sid>&func=mbox:listMessages
 
 ## 运行结果示例
 
+完整日志直接打印在 Actions 日志里（IP 已打码）：
+
 ```
 [ISO 时间] == 邮箱保活开始 ==
+[ISO 时间] 代理出口 IP: 209.146.*.*（登录将以该 IP 出站）
+[ISO 时间] 本机直连出口 IP: 202.113.*.*
+[ISO 时间] 尝试节点 (1/10): 日本01 | IEPL
 [ISO 时间] 登录成功 ✓（服务端已记录一次登录使用）
 [ISO 时间] 会话地址: https://mailh.qiye.163.com/js6/main.jsp?sid=<masked>&...
 [ISO 时间] 收件箱校验: 最新一封邮件日期: 2026-11-19 10:36:24——会话确认有效 ✓
@@ -43,23 +50,28 @@ POST https://mailh.qiye.163.com/js6/s?sid=<sid>&func=mbox:listMessages
 | 登录成功 + 收件箱有信 | `最新一封邮件日期: 2026-11-19 10:36:24` | 0 |
 | 登录成功 + 收件箱为空 | `收件箱为空——会话确认有效 ✓` | 0 |
 | 登录成功但反馈接口异常 | `登录成功，但收件箱反馈异常…` | 1 |
-| 登录失败（密码错误/风控） | 失败详情 + 重定向链（打码，3 次重试后） | 1 |
+| 登录失败（密码错误/风控） | 失败详情 + 重定向链（打码） | 1 |
 
 退出码非 0 时 GitHub Actions 任务变红并向仓库所有者发送通知。
 
 ## 运行记录（result.txt）
 
-脚本只负责向控制台输出，workflow 把输出（含 stderr）重定向到仓库根目录的 `result.txt` 并提交——**每次运行覆盖**，最新输出在文件里，历史输出留在 git 提交记录里（每次提交都是当时的输出快照）。失败的运行也会提交记录，同时任务变红触发 GitHub 通知。
-
-成功时 `result.txt` 内容：
+脚本在设置 `RESULT_FILE` 时，退出前把**一行摘要**写进该文件（CI 里 workflow 设为 `result.txt` 并提交）；完整日志只打印到控制台，也就是 Actions 日志——**日志随时可删，进入 git 历史的内容不便删除**，所以文件里刻意只留最小信息：
 
 ```
-[ISO 时间] == 邮箱保活开始 ==
-[ISO 时间] 登录成功 ✓（服务端已记录一次登录使用）
-[ISO 时间] 会话地址: https://mailh.qiye.163.com/js6/main.jsp?sid=<masked>&...
-[ISO 时间] 收件箱校验: 最新一封邮件日期: 2026-11-19 10:36:24——会话确认有效 ✓
-[ISO 时间] == 保活完成，退出码 0 ==
+# 成功（最新邮件时间即成功校验的凭据；时间为北京时间，分钟级）
+2026-11-22 12:23 成功 最新邮件: 2026-11-19 10:36:24
+
+# 成功但收件箱为空
+2026-11-22 12:23 成功 最新邮件: 收件箱为空
+
+# 失败（原因看 Actions 日志）
+2026-11-22 12:23 失败
 ```
+
+- 每次运行覆盖，`整行包含运行时间`，所以正常情况下每次都有变更可提交；历史摘要留在 git 提交记录里
+- commit message：`keepalive ok @ 日期` 或 `keepalive failed @ 日期`；失败的运行也会提交，同时任务变红触发 GitHub 通知
+- 本地运行默认不写文件（不设置 `RESULT_FILE` 即可），需要时自己指定路径
 
 - commit message：`keepalive ok @ 日期` 或 `keepalive failed @ 日期`
 - 登录失败时日志会带原因码：`password_error` / `captcha_suspected` / `login_rejected` / `network_error`
@@ -71,19 +83,50 @@ GitHub runner 的机房 IP 会触发网易登录风控（`VERIFYCODE.REQ`，本�
 
 CI 中 workflow 只负责下载固定版本的 mihomo 内核并注入 Secret，其余全部由脚本完成。mihomo 监听端口默认 **17890/19090**（刻意避开本机常见 Clash 的 7890/9090，防止流量打进你自己的 Clash 被短路直连；可用 `CLASH_MIXED_PORT`/`CLASH_CONTROLLER_PORT` 调整，脚本会自动检测端口占用并报错）。不传订阅链接且未设 `HTTPS_PROXY` 时为直连，行为不变。
 
+### 只看某些节点（`CLASH_NODE_FILTER`）
+
+订阅节点很多时，可以只让脚本使用名称包含指定关键词的节点，多个关键词用逗号（半角/全角均可）分隔，关键词可用引号包裹：
+
+```bash
+node keepalive.mjs -u you@your.domain -p your-password -s "https://sub.example/subscribe?token=xxx" \
+  --node-filter "日本,新加坡"
+
+CLASH_NODE_FILTER='"日本", "日本 01"'
+# 等价环境变量写法；关键词按"名称包含"匹配，不区分大小写
+```
+
+- 命中任一关键词即可用，脚本再按 `CLASH_MAX_NODES` 取前若干个逐个尝试
+- **一个都不匹配时本次直接失败退出（退出码 1），不会退回到其他节点**——避免打到非预期出口再被风控；日志会打印 `节点筛选（名称含 "日本"）: 65 → 8 个` 便于核对
+- CI 里在 Settings → Secrets and variables → Actions → **Variables** 新建 `CLASH_NODE_FILTER`（值如 `日本`）即可，该变量不需要保密
+- 中文关键词在 Windows 下若出现乱码，可改用订阅里节点的英文片段（如 `JP`）
+
 ## 部署
 
 推送本仓库到 GitHub（公开/私有均可，公开仓库注意事项见下节），然后：
 
-1. Settings → Secrets and variables → Actions → New repository secret，添加以下 Secret：
+1. Settings → Secrets and variables → Actions → **Secrets**（New repository secret）：
 
-   | Secret 名 | 值 |
-   |---|---|
-   | `MAIL_USERNAME` | 完整邮箱地址，如 `user@your.domain` |
-   | `MAIL_PASSWORD` | 邮箱登录密码 |
-   | `CLASH_SUB_URL` | clash 订阅链接（用于绕过 GitHub 机房 IP 的登录风控，见下文「代理」） |
+   | Secret 名 | 必填 | 值 |
+   |---|---|---|
+   | `MAIL_USERNAME` | 是 | 完整邮箱地址，如 `user@your.domain` |
+   | `MAIL_PASSWORD` | 是 | 邮箱登录密码 |
+   | `CLASH_SUB_URL` | 否 | clash 订阅链接（用法见「代理」）。**不设置就走直连**——不下载、不启动 mihomo，直接登录；GitHub runner 是机房 IP，直连大概率触发网易风控，所以 CI 里一般建议设置 |
 
-2. Actions → 「邮箱保活」→ Run workflow 手动跑一次验证；之后每周一上午（北京时间 11:23 左右）自动运行，GitHub 定时有几分钟到几十分钟延迟属正常。
+2. （可选）Settings → Secrets and variables → Actions → **Variables**（New repository variable），按需填写，全部留空则用默认值：
+
+   | Variable 名 | 作用 | 默认 |
+   |---|---|---|
+   | `CLASH_NODE_FILTER` | 只使用名称含任一关键词的节点，逗号分隔，如 `日本,新加坡` | 不过滤，全部节点参与轮换 |
+   | `CLASH_MAX_NODES` | 每次运行最多尝试几个节点 | `10` |
+   | `CLASH_TEST_URL` | 节点可用性预检地址，能访问才用该节点登录 | `https://www.gstatic.com/generate_204` |
+   | `CLASH_GROUP` | mihomo 代理组名（与订阅配置一致即可） | `PROXY` |
+   | `CLASH_MIXED_PORT` / `CLASH_CONTROLLER_PORT` | mihomo 本地监听端口 | `17890` / `19090` |
+
+   > 未设 `CLASH_SUB_URL`（直连）时，节点相关的变量都不起作用；`CLASH_NODE_FILTER` 设置了但没有代理时，日志会明确提示"无法切换/筛选节点"。
+
+3. Actions → 「邮箱保活」→ Run workflow 手动跑一次验证；之后每周一上午（北京时间 11:23 左右）自动运行，GitHub 定时有几分钟到几十分钟延迟属正常。
+
+只配齐第 1 步的两个必填 Secret 也能跑（直连），其余全部可选；workflow 里没有写死的凭据，删掉对应 Secret/Variable 即恢复默认行为。
 
 ## 本地运行
 
@@ -97,7 +140,7 @@ node keepalive.mjs -u you@your.domain -p your-password -s "https://sub.example/s
 # 走代理并自动换节点（需本机有 mihomo 内核：MIHOMO_BIN 指向它或放当前目录）
 ```
 
-也兼容位置参数 `node keepalive.mjs <邮箱> <密码> [订阅链接]`，以及环境变量（CI 即此方式）：`MAIL_USERNAME` / `MAIL_PASSWORD` / `CLASH_SUB_URL`。注意命令行参数可能留在 shell 历史记录（如 PowerShell 的 PSReadLine 会持久化历史）与进程列表中，介意的话用环境变量。
+也兼容位置参数 `node keepalive.mjs <邮箱> <密码> [订阅链接]`，以及环境变量（CI 即此方式）：`MAIL_USERNAME` / `MAIL_PASSWORD` / `CLASH_SUB_URL`。注意命令行参数可能留在 shell 历史记录（如 PowerShell 的 PSReadLine 会持久化历史）与进程列表中，介意的话用环境变量。其余可选调优变量（`CLASH_NODE_FILTER` / `CLASH_MAX_NODES` 等，见「部署」第 2 步）本地直接设同名环境变量即可，写进脚本同目录的 `.env` 也支持。
 
 ## 公开仓库注意事项
 

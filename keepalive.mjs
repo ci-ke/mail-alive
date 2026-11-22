@@ -67,6 +67,10 @@ import { parseArgs } from "node:util";
 import { fileURLToPath } from "node:url";
 import { URL } from "node:url";
 
+// 先加载脚本同目录的 .env，后面的配置常量与凭据兜底才能读到其中的值
+// （.env 已被 .gitignore；只填补 process.env 中不存在的键，真实环境变量优先）
+loadDotEnv();
+
 const LOGIN_ENDPOINT = "https://entryhz.qiye.163.com/domain/domainEntLogin";
 /** 登录成功的判定：最终落地在 webmail 主页面且带 sid 会话参数 */
 const SUCCESS_URL_PATTERN = /\/js6\/main\.jsp\?.*sid=/;
@@ -82,8 +86,6 @@ let PROXY_URL = process.env.HTTPS_PROXY?.trim() || "";
 let CLASH_API = process.env.CLASH_API?.trim() || "";
 const CLASH_GROUP = process.env.CLASH_GROUP?.trim() || "PROXY";
 const CLASH_MAX_NODES = Math.max(1, Number(process.env.CLASH_MAX_NODES || 10));
-/** 可选：按正则过滤订阅节点名（如固定使用某个出口稳定的节点） */
-const CLASH_NODE_FILTER = process.env.CLASH_NODE_FILTER?.trim() || "";
 /** 节点可用性预检地址：能访问外网（Google 204）才算可用，避免拿坏节点去碰邮箱登录 */
 const CLASH_TEST_URL =
   process.env.CLASH_TEST_URL?.trim() || "https://www.gstatic.com/generate_204";
@@ -123,6 +125,57 @@ const log = (...args) =>
     `[${new Date().toISOString()}]`,
     ...args.map((a) => (typeof a === "string" ? scrub(a) : a)),
   );
+
+/**
+ * 日志里的出口 IP 只保留网段：IPv4 留前两段、IPv6 留前两组，其余打星号。
+ * 够用来核对"是否走了节点/出口是否变化"，又不把完整地址留在公开日志里。
+ */
+function maskIp(ip) {
+  const text = String(ip ?? "").trim();
+  if (!text) return "查询失败";
+  if (text.includes(":")) return `${text.split(":").slice(0, 2).join(":")}:*`;
+  const parts = text.split(".");
+  return parts.length === 4 ? `${parts[0]}.${parts[1]}.*.*` : "***";
+}
+
+/**
+ * 运行结果的最小化记录：仅当 RESULT_FILE 指向文件时，退出前写入一行摘要
+ * （运行时间 + 成功/失败 + 最新邮件时间）。完整日志只留在控制台/Actions 日志里
+ * （日志可删），因为进入 git 仓库的内容不便删除。
+ */
+let runStarted = false;
+let resultEmailDate = null; // 成功时的最新邮件时间；空字符串表示收件箱为空
+function writeResultFile(ok) {
+  const file = process.env.RESULT_FILE?.trim();
+  if (!file) return;
+  // 固定按北京时间记录（GitHub runner 是 UTC），避免摘要时区含义不明
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(new Date());
+  const get = (type) => parts.find((p) => p.type === type)?.value ?? "";
+  const stamp = `${get("year")}-${get("month")}-${get("day")} ${get("hour")}:${get("minute")}`;
+  const body = ok
+    ? `${stamp} 成功 最新邮件: ${resultEmailDate || "收件箱为空"}\n`
+    : `${stamp} 失败\n`;
+  try {
+    fs.writeFileSync(file, body, "utf8");
+  } catch (err) {
+    console.error(`写入运行结果文件失败（${file}）: ${err.message}`);
+  }
+}
+
+// 任何退出路径（正常 return、process.exit、未捕获异常）都会走到这里
+process.on("exit", () => {
+  const code = process.exitCode ?? 0;
+  if (!runStarted && code === 0) return; // --help 等未真正开跑的路径不落文件
+  writeResultFile(code === 0 && resultEmailDate !== null);
+});
 
 /** 极简 Cookie 罐：只为跟住登录重定向链上的会话 Cookie */
 class CookieJar {
@@ -236,28 +289,78 @@ function clashRequest({ method = "GET", path, body = null }) {
 }
 
 /**
+ * 解析节点名筛选关键词（CLASH_NODE_FILTER）。
+ * 支持逗号（含全角）分隔多个关键词，关键词可用引号包裹（含空格的名字更直观）：
+ *   CLASH_NODE_FILTER="日本,新加坡"
+ *   CLASH_NODE_FILTER='"日本", "日本 01"'
+ * 注意在用时才解析：命令行 --node-filter 会在 parseCredentials 时才注入环境变量，
+ * 顶层常量会在此之前就把值固定下来。
+ */
+function parseNodeFilters(raw) {
+  if (!raw) return [];
+  const terms = [];
+  for (const match of String(raw).matchAll(/"([^"]*)"|'([^']*)'|([^,，]+)/g)) {
+    // 第三分支会把前导空格和引号一起吞进来（如 , "日本 01"），统一去掉引号
+    const term = (match[1] ?? match[2] ?? match[3] ?? "")
+      .trim()
+      .replace(/^["'“”‘’]+|["'“”‘’]+$/g, "")
+      .trim();
+    if (term) terms.push(term);
+  }
+  return terms;
+}
+
+/**
  * 计算本次运行的"线路"计划：
  *   - 未配代理 → [null]（直连）
  *   - 配了 HTTPS_PROXY 但无 CLASH_API → [null]（走代理默认节点）
  *   - 配了 HTTPS_PROXY + CLASH_API → 最多 CLASH_MAX_NODES 个节点，供逐个切换
+ *   - 设置了节点筛选但一个都不匹配 → []（由调用方按失败处理，绝不退回其他节点）
  */
 async function resolveNodePlan() {
-  if (!PROXY_URL || !CLASH_API) return [null];
+  const filters = parseNodeFilters(process.env.CLASH_NODE_FILTER);
+  if (!PROXY_URL || !CLASH_API) {
+    if (filters.length) {
+      log(
+        "已设置节点筛选（CLASH_NODE_FILTER），但本次未自动管理 mihomo，无法切换/筛选节点",
+      );
+    }
+    return [null];
+  }
   let group;
   try {
     group = await clashRequest({
       path: `/proxies/${encodeURIComponent(CLASH_GROUP)}`,
     });
   } catch (err) {
+    if (filters.length) {
+      log(
+        `读取 clash 节点列表失败（${err.message}），无法按 CLASH_NODE_FILTER 筛选节点`,
+      );
+      return [];
+    }
     log(`读取 clash 节点列表失败: ${err.message}——将使用当前默认节点`);
     return [null];
   }
   let nodes = (group?.all ?? []).filter(
     (n) => !NODE_NAME_BLACKLIST.test(n),
   );
-  if (CLASH_NODE_FILTER) {
-    nodes = nodes.filter((n) => new RegExp(CLASH_NODE_FILTER).test(n));
-    log(`节点过滤（${CLASH_NODE_FILTER}）后剩余 ${nodes.length} 个`);
+  if (filters.length) {
+    const keywords = filters.map((k) => k.toLowerCase());
+    const before = nodes.length;
+    nodes = nodes.filter((n) => {
+      const name = n.toLowerCase();
+      return keywords.some((kw) => name.includes(kw));
+    });
+    log(
+      `节点筛选（名称含 ${filters.map((k) => `"${k}"`).join(" 或 ")}）: ${before} → ${nodes.length} 个`,
+    );
+    if (!nodes.length) {
+      log(
+        "没有匹配的节点，请检查 CLASH_NODE_FILTER 或订阅内容；本次不登录（不会改用其他节点）",
+      );
+      return [];
+    }
   }
   if (!nodes.length) {
     log("订阅节点列表为空，将使用当前默认节点");
@@ -520,6 +623,9 @@ const USAGE = `用法: node keepalive.mjs [-u <邮箱>] [-p <密码>] [-s <clash
   -u, --username <邮箱>   完整邮箱地址（环境变量/​.env: MAIL_USERNAME 兜底）
   -p, --password <密码>   登录密码（环境变量/​.env: MAIL_PASSWORD 兜底）
   -s, --sub-url <链接>    clash 订阅链接；传入后自动管理 mihomo（CLASH_SUB_URL 兜底）
+      --node-filter <关键词[,关键词]>
+                          只使用名称含任一关键词的节点，如 "日本,新加坡"
+                          （环境变量 CLASH_NODE_FILTER 兜底）
   -h, --help              显示本帮助
 
 其他调优项（环境变量）: CLASH_MAX_NODES / CLASH_TEST_URL / CLASH_NODE_FILTER /
@@ -534,6 +640,7 @@ function parseCli() {
         username: { type: "string", short: "u" },
         password: { type: "string", short: "p" },
         "sub-url": { type: "string", short: "s" },
+        "node-filter": { type: "string" },
         help: { type: "boolean", short: "h" },
       },
       allowPositionals: true,
@@ -581,6 +688,10 @@ function parseCredentials() {
     process.exit(0);
   }
   const [posUser, posPass, posSub] = positionals;
+  // 拿到命令行参数后再注入，resolveNodePlan 解析的是此时的环境变量
+  if (values["node-filter"] !== undefined) {
+    process.env.CLASH_NODE_FILTER = values["node-filter"];
+  }
   const username = (values.username ?? posUser ?? process.env.MAIL_USERNAME)?.trim();
   const password = values.password ?? posPass ?? process.env.MAIL_PASSWORD;
   const subUrl =
@@ -770,10 +881,10 @@ async function getEgressIp(viaProxy = true) {
 }
 
 async function main() {
-  loadDotEnv();
   const creds = parseCredentials();
   installScrubber(creds);
   log("== 邮箱保活开始 ==");
+  runStarted = true;
   let mihomo = null;
   try {
     if (creds.subUrl) {
@@ -782,12 +893,12 @@ async function main() {
     }
     if (PROXY_URL) {
       const tunnelEgress = await getEgressIp(true);
-      log(`代理出口 IP: ${tunnelEgress ?? "查询失败"}（登录将以该 IP 出站）`);
+      log(`代理出口 IP: ${maskIp(tunnelEgress)}（登录将以该 IP 出站）`);
       // 直连对比：经节点出口与本机直连出口相同 ≠ 直连泄漏（某些机场的出口线路
       // 就是本机所在网络的教育网出口），但值得记录——mihomo 配置无 DIRECT 规则、
       // 所有请求强制过隧道，结构性上不存在直连路径
       const directEgress = await getEgressIp(false);
-      log(`本机直连出口 IP: ${directEgress ?? "查询失败"}`);
+      log(`本机直连出口 IP: ${maskIp(directEgress)}`);
       if (tunnelEgress && directEgress && tunnelEgress === directEgress) {
         log(
           "❌ 代理未生效：经节点出口与本机直连出口相同，流量疑似直连。按要求终止本次运行。",
@@ -805,6 +916,11 @@ async function main() {
 
 async function runKeepalive(creds) {
   const plan = await resolveNodePlan();
+  if (!plan.length) {
+    console.error("没有可用节点（节点筛选未匹配或无法读取节点列表），本次未登录。");
+    process.exitCode = 1;
+    return;
+  }
   for (let i = 0; i < plan.length; i++) {
     const node = plan[i];
     if (node) {
@@ -821,7 +937,7 @@ async function runKeepalive(creds) {
           url: "https://api.ipify.org",
           timeoutMs: 6000,
         });
-        if (egress.text.trim()) log(`本次登录出口 IP: ${egress.text.trim()}`);
+        if (egress.text.trim()) log(`本次登录出口 IP: ${maskIp(egress.text)}`);
       } catch {
         // 出口查询失败不影响登录
       }
@@ -889,8 +1005,10 @@ async function runKeepalive(creds) {
       (feedback.total === 0 || feedback.sentDate)
     ) {
       if (feedback.total === 0) {
+        resultEmailDate = "";
         log("收件箱校验: 收件箱为空——会话确认有效 ✓");
       } else {
+        resultEmailDate = feedback.sentDate;
         log(
           `收件箱校验: 最新一封邮件日期: ${feedback.sentDate}——会话确认有效 ✓`,
         );
@@ -911,4 +1029,8 @@ async function runKeepalive(creds) {
   process.exitCode = 1;
 }
 
-main();
+main().catch((err) => {
+  // 兜底：不让未捕获异常把堆栈（可能带本机路径）直接甩进日志
+  console.error(`运行异常: ${scrub(String(err?.message ?? err))}`);
+  process.exitCode = 1;
+});
