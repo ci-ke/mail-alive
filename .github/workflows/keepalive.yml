@@ -9,6 +9,9 @@ on:
     - cron: "23 3 * * 1" # UTC 03:23 = 北京时间 11:23
   workflow_dispatch: # 支持在 Actions 页面手动触发
 
+env:
+  MIHOMO_VERSION: "v1.19.34" # 固定版本，升级需手动修改
+
 # contents: write 仅用于提交 result.txt 运行记录
 permissions:
   contents: write
@@ -20,7 +23,7 @@ concurrency:
 jobs:
   keepalive:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       # 官方 action，且运行时 Secrets 尚未进入环境（Secrets 仅在后续步骤的 env 中）
       - uses: actions/checkout@v4
@@ -29,13 +32,18 @@ jobs:
         with:
           node-version: 20
 
-      # 输出重定向到 result.txt（含 stderr）；登录失败时保留输出并让任务变红
-      # 凭据经环境变量注入而非拼进命令行：避免密码中的特殊字符破坏 shell 引号，
-      # 也是 GitHub 官方推荐的 Secrets 用法
+      # GitHub runner 的机房 IP 会触发网易登录风控（VERIFYCODE.REQ），因此只下载
+      # mihomo 内核；配置生成、启动、节点轮换全部由脚本自动管理
+      - name: 下载 mihomo 内核
+        run: |
+          curl -sSL -o mihomo.gz "https://github.com/MetaCubeX/mihomo/releases/download/${MIHOMO_VERSION}/mihomo-linux-amd64-compatible-${MIHOMO_VERSION}.gz"
+          gunzip -f mihomo.gz && chmod +x mihomo
+
       - name: 模拟登录保活
         env:
           MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}
           MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}
+          CLASH_SUB_URL: ${{ secrets.CLASH_SUB_URL }}
         run: |
           node keepalive.mjs > result.txt 2>&1
           code=$?

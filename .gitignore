@@ -2,3 +2,11 @@ node_modules/
 *.log
 .DS_Store
 .env
+
+# mihomo 内核与运行时产物（本地手动下载，不入库）
+/bin/
+/mihomo
+/mihomo.exe
+/mihomo.gz
+/config.yaml
+/providers/

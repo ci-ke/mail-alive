@@ -65,28 +65,39 @@ POST https://mailh.qiye.163.com/js6/s?sid=<sid>&func=mbox:listMessages
 - 登录失败时日志会带原因码：`password_error` / `captcha_suspected` / `login_rejected` / `network_error`
 - 这些真实运行记录的提交也让仓库持续有活动，GitHub 的 60 天停用规则通常因此不会触发
 
+## 代理（GitHub 上基本必需）
+
+GitHub runner 的机房 IP 会触发网易登录风控（`VERIFYCODE.REQ`，本地宽带则不会，实测确认）。给脚本传入 clash 订阅链接（`--sub-url` 参数或 Secret `CLASH_SUB_URL`）后，脚本全自动管理 mihomo：查找内核（环境变量 `MIHOMO_BIN` → 项目 `bin/` 目录 → 当前目录 → 常见安装位置）→ 生成临时配置 → 启动 → 等订阅加载 → 逐个切换节点尝试登录（触发验证码或网络错误就换下一个，默认最多 8 个，`CLASH_MAX_NODES` 可调）→ 结束时自动关闭内核。密码错误是确定性失败，会立即停止。配置与订阅内容只写入系统临时目录，不进入仓库；HTTPS 端到端加密，代理只能看到目标域名，看不到密码与邮件内容。
+
+CI 中 workflow 只负责下载固定版本的 mihomo 内核并注入 Secret，其余全部由脚本完成。不传订阅链接且未设 `HTTPS_PROXY` 时为直连，行为不变。
+
 ## 部署
 
 推送本仓库到 GitHub（公开/私有均可，公开仓库注意事项见下节），然后：
 
-1. Settings → Secrets and variables → Actions → New repository secret，添加两个 Secret：
+1. Settings → Secrets and variables → Actions → New repository secret，添加以下 Secret：
 
    | Secret 名 | 值 |
    |---|---|
    | `MAIL_USERNAME` | 完整邮箱地址，如 `user@your.domain` |
    | `MAIL_PASSWORD` | 邮箱登录密码 |
+   | `CLASH_SUB_URL` | clash 订阅链接（用于绕过 GitHub 机房 IP 的登录风控，见下文「代理」） |
 
 2. Actions → 「邮箱保活」→ Run workflow 手动跑一次验证；之后每周一上午（北京时间 11:23 左右）自动运行，GitHub 定时有几分钟到几十分钟延迟属正常。
 
 ## 本地运行
 
-凭据用命令行参数即可，cmd / PowerShell / bash 语法完全一致：
+命名参数（argparse 风格，cmd / PowerShell / bash 语法一致，`--help` 查看全部）：
 
 ```bash
-node keepalive.mjs you@your.domain your-password
+node keepalive.mjs -u you@your.domain -p your-password
+# 直连登录（本地宽带一般不会触发风控）
+
+node keepalive.mjs -u you@your.domain -p your-password -s "https://sub.example/subscribe?token=xxx"
+# 走代理并自动换节点（需本机有 mihomo 内核：MIHOMO_BIN 指向它或放当前目录）
 ```
 
-也支持环境变量（CI 即此方式）：bash 为 `MAIL_USERNAME=... MAIL_PASSWORD=... node keepalive.mjs`，PowerShell 用 `$env:MAIL_USERNAME = "..."` 等。注意命令行参数可能留在 shell 历史记录（如 PowerShell 的 PSReadLine 会持久化历史）与进程列表中，介意的话用环境变量。
+也兼容位置参数 `node keepalive.mjs <邮箱> <密码> [订阅链接]`，以及环境变量（CI 即此方式）：`MAIL_USERNAME` / `MAIL_PASSWORD` / `CLASH_SUB_URL`。注意命令行参数可能留在 shell 历史记录（如 PowerShell 的 PSReadLine 会持久化历史）与进程列表中，介意的话用环境变量。
 
 ## 公开仓库注意事项
 
@@ -100,7 +111,7 @@ node keepalive.mjs you@your.domain your-password
 | 风险 | 说明 | 对策 |
 |---|---|---|
 | GitHub 停用定时任务 | 仓库 60 天无任何活动会自动停用 scheduled workflow（邮件提醒，公有/私有仓库都适用） | 每周 run 都会提交一次 result.txt 运行记录，仓库持续有活动，通常不会触发；万一停用，按邮件提醒到 Actions 页面重新启用即可 |
-| 网易风控/验证码 | 连续多次密码错误会触发"密码输入错误次数过多"的临时限制（实测确认，等一段时间或网页端手动登录一次即恢复）；GitHub runner 的海外 IP 段理论上也可能触发风控 | 脚本对确定性失败（密码错误/验证码/拒绝）**不重试、立即退出**，避免加重风控；日志明确报出原因码；若海外 IP 长期被风控，可改用自托管 runner（家里电脑/NAS） |
+| 网易风控/验证码 | GitHub runner 机房 IP 登录会触发风控（实测确认）；连续多次密码错误也会触发"密码错误次数过多"的临时限制（等一段时间或网页端手动登录一次即恢复） | 内置 mihomo + 订阅节点自动轮换（见「代理」）；脚本对密码错误等确定性失败立即停止、不浪费重试；若订阅节点全部被风控，可改用自托管 runner（家里电脑/NAS） |
 | 密码更换 | 密码修改后脚本会失败 | 更新 `MAIL_PASSWORD` Secret 即可 |
 | 频率 | 每周一次足够（规则是"连续一年"），过于频繁无必要 | 保持现状即可，不建议加大频率 |
 | 反馈接口变更 | `mbox:listMessages` 为 webmail 前端接口，网易改版可能变化 | 登录本身仍有效；反馈异常会以退出码 1 提醒人工检查 |
